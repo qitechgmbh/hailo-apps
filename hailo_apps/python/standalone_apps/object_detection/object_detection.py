@@ -8,6 +8,35 @@ from types import SimpleNamespace
 from pathlib import Path
 import collections
 import numpy as np
+from flask import Flask, Response
+import cv2
+
+# Initialize Flask app for streaming
+app = Flask(__name__)
+output_frame = None
+frame_lock = threading.Lock()
+
+def generate_frames():
+    """Generator function for the MJPEG stream."""
+    global output_frame, frame_lock
+    while True:
+        with frame_lock:
+            if output_frame is None:
+                continue
+            ret, buffer = cv2.imencode('.jpg', output_frame)
+            frame_bytes = buffer.tobytes()
+        
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+
+@app.route('/video_feed')
+def video_feed():
+    return Response(generate_frames(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
+def run_flask():
+    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+
 
 # -----------------------------------------------------------------------------
 # Ensure repository root is available in sys.path
@@ -69,7 +98,7 @@ def parse_args():
         help=(
             "Enable object tracking for detections. "
             "When enabled, detected objects will be tracked across frames using a tracking algorithm "
-            "(e.g., ByteTrack). This assigns consistent IDs to objects over time, enabling temporal analysis, "
+            "(e.g., Bytetrack). This assigns consistent IDs to objects over time, enabling temporal analysis, "
             "trajectory visualization, and multi-frame association. Useful for video processing applications."
         ),
     )
@@ -173,15 +202,30 @@ def run_inference_pipeline(
         )
         timer_thread.start()
 
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info("Stream available at http://<your-device-ip>:5000/video_feed")
     try:
-        visualize(
-            input_context,
-            visualization_settings,
-            output_queue,
-            post_process_callback_fn,
-            fps_tracker,
-            stop_event,
-        )
+        # Instead of 'visualize', we create a custom loop to process the output_queue
+        while not stop_event.is_set():
+            try:
+                # Get processed data from the queue (blocks for a short timeout)
+                batch_data = output_queue.get(timeout=1)
+                if batch_data is None: break
+
+                frame, result = batch_data
+                
+                # Apply your post-processing/drawing (formerly done inside visualize)
+                # post_process_callback_fn returns the frame with boxes drawn
+                processed_frame = post_process_callback_fn(frame, result)
+                processed_frame = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
+                # Update the global frame for the Flask streamer
+                global output_frame
+                with frame_lock:
+                    output_frame = processed_frame
+
+            except queue.Empty:
+                continue
     finally:
         stop_event.set()
         preprocess_thread.join()
@@ -189,9 +233,7 @@ def run_inference_pipeline(
 
     if show_fps:
         logger.info(fps_tracker.frame_rate_summary())
-
     logger.success("Processing completed successfully.")
-
     if visualization_settings.save_stream_output or input_context.has_images:
         logger.info(f"Saved outputs to '{visualization_settings.output_dir}'.")
 
