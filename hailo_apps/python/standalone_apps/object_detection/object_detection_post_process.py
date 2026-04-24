@@ -17,7 +17,7 @@ from collections import deque
 # The keys will be the track IDs.
 tracklet_history = {}
 # Maximum number of past frames to display
-trail_length = 30 
+trail_length = 30
 # Only draw trail for certain classes (e.g., person=0, phone=67 in COCO)
 TRACKLET_CLASSES = [0, 67]  # PERSON, SMARTPHONE
 
@@ -37,7 +37,9 @@ def inference_result_handler(original_frame, infer_results, labels, config_data,
     """
     detections = extract_detections(original_frame, infer_results, config_data)  # Should return dict with boxes, classes, scores
     frame_with_detections = draw_detections(detections, original_frame, labels, tracker=tracker, draw_trail=draw_trail)
-    return frame_with_detections
+    for index,detected_class_index in enumerate(detections["detection_classes"]):
+        detections["detection_classes"][index] = labels[detected_class_index]
+    return frame_with_detections, detections
 
 
 def draw_detection(image: np.ndarray, box: list, labels: list, score: float, color: tuple, track=False):
@@ -208,7 +210,7 @@ def draw_detections(detections: dict, img_out: np.ndarray, labels, tracker=None,
             else:
                 draw_detection(img_out, [xmin, ymin, xmax, ymax], [labels[classes[best_idx]], f"ID {track_id}"],
                                track.score * 100.0, color, track=True)
-                               
+
             if not classes[best_idx] in TRACKLET_CLASSES:
                 continue
 
@@ -216,7 +218,7 @@ def draw_detections(detections: dict, img_out: np.ndarray, labels, tracker=None,
             center_x = int((x1 + x2) / 2)
             center_y = int((y1 + y2) / 2)
             centroid = (center_x, center_y)
-            
+
             # Initialize or update the tracklet history
             if track_id not in tracklet_history:
                 tracklet_history[track_id] = deque(maxlen=trail_length)

@@ -16,6 +16,39 @@ app = Flask(__name__)
 output_frame = None
 frame_lock = threading.Lock()
 
+import socket
+import json
+
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.float32) or isinstance(obj, np.float64):
+            return float(obj)
+        if isinstance(obj, np.int32) or isinstance(obj, np.int64):
+            return int(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NumpyEncoder, self).default(obj)
+
+def send_detections_to_socket(detections_list):
+    # Path to the socket file created by the receiver
+    socket_path = "/tmp/qitech_object_detections.sock"
+    json_data = json.dumps(detections_list, cls=NumpyEncoder).encode('utf-8')
+    # 1. Check if the socket file actually exists before trying to connect
+    if not os.path.exists(socket_path):
+        return # Or log a warning
+    try:
+        # 2. Create a Unix Domain Socket (AF_UNIX)
+        # SOCK_STREAM is used for TCP-like reliable connection
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        # 3. Connect to the receiver
+        client.connect(socket_path)
+        client.sendall(json_data)
+    except Exception as e:
+        print(f"Socket Error: {e}")
+    finally:
+        # 6. Always close the connection
+        client.close()
+
 def generate_frames():
     """Generator function for the MJPEG stream."""
     global output_frame, frame_lock
@@ -25,7 +58,7 @@ def generate_frames():
                 continue
             ret, buffer = cv2.imencode('.jpg', output_frame)
             frame_bytes = buffer.tobytes()
-        
+
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
@@ -134,7 +167,7 @@ def run_inference_pipeline(
     input_context: InputContext,
     visualization_settings: VisualizationSettings,
     enable_tracking: bool = False,
-    show_fps: bool = False,
+    show_fps: bool = True,
     draw_trail: bool = False,
     time_to_run: int | None = None,
 ) -> None:
@@ -214,11 +247,13 @@ def run_inference_pipeline(
                 if batch_data is None: break
 
                 frame, result = batch_data
-                
+
                 # Apply your post-processing/drawing (formerly done inside visualize)
                 # post_process_callback_fn returns the frame with boxes drawn
-                processed_frame = post_process_callback_fn(frame, result)
+                processed_frame, detections = post_process_callback_fn(frame, result)
                 processed_frame = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
+                send_detections_to_socket(detections)
+                print(detections)
                 # Update the global frame for the Flask streamer
                 global output_frame
                 with frame_lock:
