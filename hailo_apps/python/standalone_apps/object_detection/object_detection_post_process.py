@@ -21,6 +21,42 @@ trail_length = 30
 # Only draw trail for certain classes (e.g., person=0, phone=67 in COCO)
 TRACKLET_CLASSES = [0, 67]  # PERSON, SMARTPHONE
 
+import cv2
+import numpy as np
+
+def get_hls_color(crop):
+    # 1. Shrink crop to focus on the center of the bottle cap
+    h, w, _ = crop.shape
+    center_roi = crop[int(h*0.3):int(h*0.7), int(cw*0.3):int(cw*0.7)]
+    
+    # 2. Convert BGR to HLS
+    hls_crop = cv2.cvtColor(center_roi, cv2.COLOR_BGR2HLS)
+    
+    # 3. Define bounds based on your Rust values
+    # Format: (Hue/2, Lightness*255, Saturation*255)
+    bounds = {
+        "Light Blue":   {"min": [195/2, 0.2*255, 0.3*255], "max": [230/2, 0.5*255, 1.0*255]},
+        "Blue":         {"min": [200/2, 0.1*255, 0.2*255], "max": [230/2, 0.4*255, 1.0*255]},
+        "Light Green":  {"min": [98/2, 0.05*255, 0.1*255], "max": [148/2, 0.75*255, 1.0*255]},
+        "Green":        {"min": [98/2, 0.02*255, 0.25*255], "max": [185/2, 0.2*255, 1.0*255]},
+        "White":        {"min": [0/2, 0.3*255, 0.0*255],   "max": [360/2, 1.0*255, 0.1*255]},
+        "Gray":         {"min": [0/2, 0.1*255, 0.0*255],   "max": [360/2, 0.6*255, 0.11*255]},
+        "Pink":         {"min": [334/2, 0.4*255, 0.1*255], "max": [355/2, 0.6*255, 0.5*255]},
+        "Yellow":       {"min": [18/2, 0.1*255, 0.25*255], "max": [50/2, 0.4*255, 1.0*255]},
+    }
+
+    max_score = 0
+    winner = "Unknown"
+
+    for color_name, limit in bounds.items():
+        mask = cv2.inRange(hls_crop, np.array(limit["min"]), np.array(limit["max"]))
+        score = cv2.countNonZero(mask)
+        if score > max_score:
+            max_score = score
+            winner = color_name
+            
+    return winner
+
 def inference_result_handler(original_frame, infer_results, labels, config_data, tracker=None, draw_trail=False):
     """
     Processes inference results and draw detections (with optional tracking).
