@@ -6,3 +6,5 @@ cython_bbox
 python-dotenv
 PyYAML
 flask
+fastapi
+uvicorn

@@ -29,47 +29,47 @@ class NumpyEncoder(json.JSONEncoder):
             return obj.tolist()
         return super(NumpyEncoder, self).default(obj)
 
-def send_detections_to_socket(detections_list):
-    # Path to the socket file created by the receiver
-    socket_path = "/tmp/qitech_object_detections.sock"
-    json_data = json.dumps(detections_list, cls=NumpyEncoder).encode('utf-8')
-    # 1. Check if the socket file actually exists before trying to connect
-    if not os.path.exists(socket_path):
-        return # Or log a warning
-    try:
-        # 2. Create a Unix Domain Socket (AF_UNIX)
-        # SOCK_STREAM is used for TCP-like reliable connection
-        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        # 3. Connect to the receiver
-        client.connect(socket_path)
-        client.sendall(json_data)
-    except Exception as e:
-        print(f"Socket Error: {e}")
-    finally:
-        # 6. Always close the connection
-        client.close()
+import asyncio
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+import uvicorn
 
-def generate_frames():
-    """Generator function for the MJPEG stream."""
-    global output_frame, frame_lock
+app = FastAPI()
+
+class StreamState:
+    def __init__(self):
+        self.latest_frame = None
+        self.new_frame_event = asyncio.Event()
+
+    def update_frame(self, frame_bytes):
+        self.latest_frame = frame_bytes
+        # Wake up any waiting browser connections
+        self.new_frame_event.set()
+        self.new_frame_event.clear()
+
+stream_state = StreamState()
+
+async def frame_generator():
     while True:
-        with frame_lock:
-            if output_frame is None:
-                continue
-            ret, buffer = cv2.imencode('.jpg', output_frame)
-            frame_bytes = buffer.tobytes()
+        # Wait for a new frame signal (avoids busy-waiting CPU)
+        await stream_state.new_frame_event.wait()
+        frame = stream_state.latest_frame
+        if frame:
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+@app.get("/video_feed")
+async def video_feed():
+    return StreamingResponse(frame_generator(),
+                             media_type="multipart/x-mixed-replace; boundary=frame")
 
-@app.route('/video_feed')
-def video_feed():
-    return Response(generate_frames(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+@app.get("/")
+async def index():
+    return StreamingResponse("<html><body><img src='/video_feed' width='100%' height='100%'></body></html>", media_type="text/html")
 
-def run_flask():
-    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
-
+def start_web_server():
+    # Use uvicorn for high-performance async serving
+    uvicorn.run(app, host="0.0.0.0", port=5000, log_level="warning")
 
 # -----------------------------------------------------------------------------
 # Ensure repository root is available in sys.path
@@ -235,29 +235,30 @@ def run_inference_pipeline(
         )
         timer_thread.start()
 
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logger.info("Stream available at http://<your-device-ip>:5000/video_feed")
+    threading.Thread(target=start_web_server, daemon=True).start()
     try:
-        # Instead of 'visualize', we create a custom loop to process the output_queue
         while not stop_event.is_set():
             try:
-                # Get processed data from the queue (blocks for a short timeout)
                 batch_data = output_queue.get(timeout=1)
                 if batch_data is None: break
 
                 frame, result = batch_data
-
-                # Apply your post-processing/drawing (formerly done inside visualize)
-                # post_process_callback_fn returns the frame with boxes drawn
                 processed_frame, detections = post_process_callback_fn(frame, result)
-                processed_frame = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
-                send_detections_to_socket(detections)
-                print(detections)
-                # Update the global frame for the Flask streamer
-                global output_frame
-                with frame_lock:
-                    output_frame = processed_frame
+
+                # 1. Send detections ASAP (before encoding)
+                # send_detections_to_socket_optimized(detections)
+
+                # 2. Encode to JPEG once here
+                # BGR is standard for OpenCV, encoding directly from BGR saves a cvtColor call
+                ret, buffer = cv2.imencode('.jpg', processed_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                if ret:
+                    # Update the state that FastAPI reads from
+                    stream_state.update_frame(buffer.tobytes())
+
+                if ret:
+                    global encoded_frame
+                    with frame_lock:
+                        encoded_frame = buffer.tobytes()
 
             except queue.Empty:
                 continue
